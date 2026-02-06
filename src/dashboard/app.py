@@ -126,9 +126,23 @@ def main() -> None:
     crime_types = sorted(df["crime_name"].unique())
     selected_crime = st.sidebar.selectbox("Crime Type", ["All"] + crime_types, key="crime_filter")
 
+    st.sidebar.divider()
+    metric_options = {
+        "Total Crimes": "total_crimes",
+        "Crime Rate per 1,000 inhabitants": "avg_rate_per_1000",
+    }
+    selected_metric_label = st.sidebar.radio(
+        "Map Metric",
+        list(metric_options.keys()),
+        index=1,
+        key="metric_filter",
+        help="'Per 1,000' normalizes by population so small and large cities are comparable",
+    )
+    selected_metric = metric_options[selected_metric_label]
+
     # --- Show active selection ---
     crime_label = "All Crime Types" if selected_crime == "All" else selected_crime
-    st.info(f"Showing: **{crime_label}** in **{selected_year}**")
+    st.info(f"Showing: **{crime_label}** in **{selected_year}** | Metric: **{selected_metric_label}**")
 
     # --- Filter data with spinner ---
     with st.spinner("Filtering and aggregating data..."):
@@ -147,16 +161,21 @@ def main() -> None:
         )
 
     # --- Summary cards ---
-    col1, col2, col3 = st.columns(3)
+    col1, col2, col3, col4 = st.columns(4)
     with col1:
         st.metric("Total Registered Crimes", f"{agg['total_crimes'].sum():,.0f}")
     with col2:
         if not agg.empty:
-            top = agg.loc[agg["total_crimes"].idxmax()]
-            st.metric("Highest Crime Municipality", top["region_name"])
+            st.metric("Avg Rate per 1,000", f"{agg['avg_rate_per_1000'].mean():,.1f}")
         else:
-            st.metric("Highest Crime Municipality", "N/A")
+            st.metric("Avg Rate per 1,000", "N/A")
     with col3:
+        if not agg.empty:
+            top = agg.loc[agg[selected_metric].idxmax()]
+            st.metric("Highest Municipality", top["region_name"])
+        else:
+            st.metric("Highest Municipality", "N/A")
+    with col4:
         st.metric("Municipalities", f"{len(agg)}")
 
     # --- Map ---
@@ -177,22 +196,22 @@ def main() -> None:
             geojson=geojson,
             map_data=agg,
             code_field=code_field,
-            value_col="total_crimes",
-            legend_name=f"Registered Crimes - {crime_label} ({selected_year})",
+            value_col=selected_metric,
+            legend_name=f"{selected_metric_label} - {crime_label} ({selected_year})",
         )
 
     st_folium(m, width=900, height=600, returned_objects=[])
 
     # --- Top 10 bar chart ---
-    st.subheader(f"Top 10 Municipalities - {crime_label} ({selected_year})")
-    top10 = agg.nlargest(10, "total_crimes")
+    st.subheader(f"Top 10 Municipalities by {selected_metric_label} - {crime_label} ({selected_year})")
+    top10 = agg.nlargest(10, selected_metric)
     fig_bar = px.bar(
         top10,
         x="region_name",
-        y="total_crimes",
-        color="total_crimes",
+        y=selected_metric,
+        color=selected_metric,
         color_continuous_scale="OrRd",
-        labels={"region_name": "Municipality", "total_crimes": "Registered Crimes"},
+        labels={"region_name": "Municipality", selected_metric: selected_metric_label},
     )
     fig_bar.update_layout(showlegend=False, xaxis_tickangle=-45)
     st.plotly_chart(fig_bar, use_container_width=True)
