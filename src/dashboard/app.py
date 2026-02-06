@@ -60,7 +60,6 @@ def get_municipality_code_field(geojson: dict) -> str:
     if not geojson.get("features"):
         return "identificatie"
     props = geojson["features"][0].get("properties", {})
-    # PDOK uses 'identificatie' for the code
     for candidate in ["identificatie", "gemeentecode", "code", "GM_CODE", "statcode"]:
         if candidate in props:
             return candidate
@@ -98,14 +97,21 @@ def main() -> None:
     st.title("Netherlands Crime Dashboard")
     st.markdown("Interactive visualization of registered crime across Dutch municipalities.")
 
-    # Load data
-    try:
-        df = load_crime_data()
-        geojson = load_geojson()
-    except Exception as e:
-        st.error(f"Failed to load data: {e}")
-        st.info("Make sure the pipeline has been run and the database is available.")
-        return
+    # --- Load data with spinner ---
+    with st.spinner("Loading crime data from database..."):
+        try:
+            df = load_crime_data()
+        except Exception as e:
+            st.error(f"Failed to load crime data: {e}")
+            st.info("Make sure the pipeline has been run and the database is available.")
+            return
+
+    with st.spinner("Loading municipality boundaries..."):
+        try:
+            geojson = load_geojson()
+        except Exception as e:
+            st.error(f"Failed to load GeoJSON: {e}")
+            return
 
     if df.empty:
         st.warning("No crime data found. Run the pipeline first.")
@@ -115,25 +121,30 @@ def main() -> None:
     st.sidebar.header("Filters")
 
     years = sorted(df["year"].unique())
-    selected_year = st.sidebar.selectbox("Year", years, index=len(years) - 1)
+    selected_year = st.sidebar.selectbox("Year", years, index=len(years) - 1, key="year_filter")
 
     crime_types = sorted(df["crime_name"].unique())
-    selected_crime = st.sidebar.selectbox("Crime Type", ["All"] + crime_types)
+    selected_crime = st.sidebar.selectbox("Crime Type", ["All"] + crime_types, key="crime_filter")
 
-    # --- Filter data ---
-    filtered = df[df["year"] == selected_year]
-    if selected_crime != "All":
-        filtered = filtered[filtered["crime_name"] == selected_crime]
+    # --- Show active selection ---
+    crime_label = "All Crime Types" if selected_crime == "All" else selected_crime
+    st.info(f"Showing: **{crime_label}** in **{selected_year}**")
 
-    # Aggregate by municipality (sum across crime types if "All")
-    agg = (
-        filtered.groupby(["region_code", "region_name"])
-        .agg(
-            total_crimes=("registered_crimes", "sum"),
-            avg_rate_per_1000=("registered_crimes_per_1000", "mean"),
+    # --- Filter data with spinner ---
+    with st.spinner("Filtering and aggregating data..."):
+        filtered = df[df["year"] == selected_year].copy()
+        if selected_crime != "All":
+            filtered = filtered[filtered["crime_name"] == selected_crime]
+
+        # Aggregate by municipality (sum across crime types if "All")
+        agg = (
+            filtered.groupby(["region_code", "region_name"])
+            .agg(
+                total_crimes=("registered_crimes", "sum"),
+                avg_rate_per_1000=("registered_crimes_per_1000", "mean"),
+            )
+            .reset_index()
         )
-        .reset_index()
-    )
 
     # --- Summary cards ---
     col1, col2, col3 = st.columns(3)
@@ -149,30 +160,31 @@ def main() -> None:
         st.metric("Municipalities", f"{len(agg)}")
 
     # --- Map ---
-    st.subheader(f"Crime Heatmap — {selected_year}")
+    st.subheader(f"Crime Heatmap - {crime_label} ({selected_year})")
 
-    code_field = get_municipality_code_field(geojson)
+    with st.spinner("Building map..."):
+        code_field = get_municipality_code_field(geojson)
 
-    # Match GeoJSON codes to CBS codes
-    # PDOK codes may or may not have "GM" prefix — normalize
-    if geojson.get("features"):
-        sample_code = str(
-            geojson["features"][0].get("properties", {}).get(code_field, "")
+        # Match GeoJSON codes to CBS codes
+        if geojson.get("features"):
+            sample_code = str(
+                geojson["features"][0].get("properties", {}).get(code_field, "")
+            )
+            if not sample_code.startswith("GM") and agg["region_code"].str.startswith("GM").all():
+                agg["region_code"] = agg["region_code"].str.replace("GM", "", n=1)
+
+        m = build_choropleth(
+            geojson=geojson,
+            map_data=agg,
+            code_field=code_field,
+            value_col="total_crimes",
+            legend_name=f"Registered Crimes - {crime_label} ({selected_year})",
         )
-        if not sample_code.startswith("GM") and agg["region_code"].str.startswith("GM").all():
-            agg["region_code"] = agg["region_code"].str.replace("GM", "", n=1)
 
-    m = build_choropleth(
-        geojson=geojson,
-        map_data=agg,
-        code_field=code_field,
-        value_col="total_crimes",
-        legend_name=f"Registered Crimes ({selected_year})",
-    )
-    st_folium(m, width=900, height=600)
+    st_folium(m, width=900, height=600, returned_objects=[])
 
     # --- Top 10 bar chart ---
-    st.subheader("Top 10 Municipalities by Crime Count")
+    st.subheader(f"Top 10 Municipalities - {crime_label} ({selected_year})")
     top10 = agg.nlargest(10, "total_crimes")
     fig_bar = px.bar(
         top10,
@@ -186,9 +198,13 @@ def main() -> None:
     st.plotly_chart(fig_bar, use_container_width=True)
 
     # --- National trend line ---
-    st.subheader("National Crime Trend Over Years")
+    trend_title = f"National Trend - {crime_label}"
+    st.subheader(trend_title)
+    trend_df = df.copy()
+    if selected_crime != "All":
+        trend_df = trend_df[trend_df["crime_name"] == selected_crime]
     yearly = (
-        df.groupby("year")
+        trend_df.groupby("year")
         .agg(total_crimes=("registered_crimes", "sum"))
         .reset_index()
     )
@@ -202,7 +218,7 @@ def main() -> None:
     st.plotly_chart(fig_line, use_container_width=True)
 
     # --- Data table ---
-    with st.expander("View Raw Data"):
+    with st.expander(f"View Raw Data - {crime_label} ({selected_year})"):
         st.dataframe(agg.sort_values("total_crimes", ascending=False), use_container_width=True)
 
 
