@@ -1,0 +1,12 @@
+cbsodata>=1.3
+pandas>=2.0
+pyarrow>=14.0
+sqlalchemy>=2.0
+psycopg2-binary>=2.9
+geoalchemy2>=0.14
+streamlit>=1.30
+folium>=0.15
+streamlit-folium>=0.18
+plotly>=5.18
+requests>=2.31
+python-dotenv>=1.0
