@@ -16,28 +16,26 @@ RAW_DIR = Path(__file__).resolve().parents[2] / "data" / "raw"
 
 
 def fetch_municipalities_geojson() -> dict:
-    """Fetch all municipality boundaries from PDOK, handling pagination."""
+    """Fetch all municipality boundaries from PDOK, handling pagination via 'next' links."""
     all_features = []
-    offset = 0
-    limit = 100
+    url = f"{PDOK_BASE}?f=json&limit=100"
 
-    while True:
-        url = f"{PDOK_BASE}?f=json&limit={limit}&offset={offset}"
-        logger.info("Fetching PDOK page offset=%d ...", offset)
+    while url:
+        logger.info("Fetching PDOK page: %s", url)
         resp = requests.get(url, timeout=60)
         resp.raise_for_status()
         data = resp.json()
 
         features = data.get("features", [])
-        if not features:
-            break
-
         all_features.extend(features)
         logger.info("Got %d features (total so far: %d)", len(features), len(all_features))
 
-        if len(features) < limit:
-            break
-        offset += limit
+        # Follow OGC 'next' link for pagination
+        url = None
+        for link in data.get("links", []):
+            if link.get("rel") == "next":
+                url = link["href"]
+                break
 
     geojson = {
         "type": "FeatureCollection",

@@ -44,28 +44,20 @@ def build_dim_periods(df: pd.DataFrame) -> pd.DataFrame:
 
 
 def build_dim_regions(df: pd.DataFrame) -> pd.DataFrame:
-    """Extract unique regions dimension."""
-    code_col = "RegioS" if "RegioS" in df.columns else "Regions"
+    """Extract unique regions dimension using region_code and RegioS (name)."""
     name_col = "RegioS" if "RegioS" in df.columns else "Regions"
 
-    # CBS data has separate code and name — but in 83648NED the RegioS column
-    # contains the code. The name may be in a Title field or we derive it.
-    regions = df[[code_col]].drop_duplicates().rename(columns={code_col: "region_code"})
-
-    # Try to get region names from a Title column if present
-    if "Title" in df.columns:
-        name_map = df.drop_duplicates(subset=[code_col]).set_index(code_col)["Title"].to_dict()
-        regions["region_name"] = regions["region_code"].map(name_map)
-    else:
-        regions["region_name"] = regions["region_code"]
-
+    regions = (
+        df[["region_code", name_col]]
+        .drop_duplicates(subset=["region_code"])
+        .rename(columns={name_col: "region_name"})
+    )
     logger.info("Built dim_regions: %d rows", len(regions))
     return regions.reset_index(drop=True)
 
 
 def build_dim_crime_types(df: pd.DataFrame) -> pd.DataFrame:
     """Extract unique crime type dimension."""
-    # CBS column name for crime type
     code_col = None
     for candidate in ["SoortMisdrijf", "Misdrijf", "CrimeType"]:
         if candidate in df.columns:
@@ -73,7 +65,6 @@ def build_dim_crime_types(df: pd.DataFrame) -> pd.DataFrame:
             break
 
     if code_col is None:
-        # Fallback: look for any column with 'misdrijf' or 'crime' in name
         for col in df.columns:
             if "misdrijf" in col.lower() or "crime" in col.lower():
                 code_col = col
@@ -83,7 +74,7 @@ def build_dim_crime_types(df: pd.DataFrame) -> pd.DataFrame:
         raise ValueError(f"Cannot find crime type column in: {list(df.columns)}")
 
     crime_types = df[[code_col]].drop_duplicates().rename(columns={code_col: "crime_code"})
-    crime_types["crime_name"] = crime_types["crime_code"]  # Will be enriched later
+    crime_types["crime_name"] = crime_types["crime_code"]
     logger.info("Built dim_crime_types: %d rows (source column: %s)", len(crime_types), code_col)
     return crime_types.reset_index(drop=True)
 
@@ -95,7 +86,6 @@ def build_fact_crimes(
     dim_periods: pd.DataFrame,
 ) -> pd.DataFrame:
     """Build fact table by joining raw data with dimension IDs."""
-    code_col = "RegioS" if "RegioS" in df.columns else "Regions"
     period_col = "Perioden" if "Perioden" in df.columns else "Periods"
 
     # Find crime type column
@@ -104,35 +94,20 @@ def build_fact_crimes(
         if candidate in df.columns:
             crime_col = candidate
             break
-    if crime_col is None:
-        for col in df.columns:
-            if "misdrijf" in col.lower() or "crime" in col.lower():
-                crime_col = col
-                break
 
-    # Find value columns for registered crimes
-    value_col = None
-    rate_col = None
-    for col in df.columns:
-        col_lower = col.lower()
-        if "geregistreerd" in col_lower or "registered" in col_lower:
-            if "relatief" in col_lower or "1000" in col_lower or "per" in col_lower:
-                rate_col = col
-            else:
-                if value_col is None:
-                    value_col = col
-        elif "totaalmisdrijven" in col_lower.replace(" ", ""):
-            value_col = col
-
-    # Build region ID mapping
-    region_map = dim_regions.reset_index().set_index("region_code")["index"].to_dict()
-    crime_map = dim_crime_types.reset_index().set_index("crime_code")["index"].to_dict()
-    period_map = dim_periods.reset_index().set_index("period_code")["index"].to_dict()
+    # Map to dimension indices
+    region_map = dict(zip(dim_regions["region_code"], dim_regions.index))
+    crime_map = dict(zip(dim_crime_types["crime_code"], dim_crime_types.index))
+    period_map = dict(zip(dim_periods["period_code"], dim_periods.index))
 
     fact = df.copy()
-    fact["region_id"] = fact[code_col].map(region_map)
+    fact["region_id"] = fact["region_code"].map(region_map)
     fact["crime_type_id"] = fact[crime_col].map(crime_map)
     fact["period_id"] = fact[period_col].map(period_map)
+
+    # Use the actual CBS column names for values
+    value_col = "TotaalGeregistreerdeMisdrijven_1"
+    rate_col = "GeregistreerdeMisdrijvenPer1000Inw_3"
 
     fact["registered_crimes"] = pd.to_numeric(fact.get(value_col, pd.Series()), errors="coerce")
     fact["registered_crimes_per_1000"] = pd.to_numeric(
