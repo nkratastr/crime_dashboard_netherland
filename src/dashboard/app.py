@@ -144,13 +144,13 @@ def main() -> None:
     crime_label = "All Crime Types" if selected_crime == "All" else selected_crime
     st.info(f"Showing: **{crime_label}** in **{selected_year}** | Metric: **{selected_metric_label}**")
 
-    # --- Filter data with spinner ---
-    with st.spinner("Filtering and aggregating data..."):
+    # --- Process everything inside a visible status indicator ---
+    with st.status("Updating dashboard...", expanded=False) as status:
+        status.update(label="Filtering data...", state="running")
         filtered = df[df["year"] == selected_year].copy()
         if selected_crime != "All":
             filtered = filtered[filtered["crime_name"] == selected_crime]
 
-        # Aggregate by municipality (sum across crime types if "All")
         agg = (
             filtered.groupby(["region_code", "region_name"])
             .agg(
@@ -159,6 +159,54 @@ def main() -> None:
             )
             .reset_index()
         )
+
+        status.update(label="Building map...", state="running")
+        code_field = get_municipality_code_field(geojson)
+
+        if geojson.get("features"):
+            sample_code = str(
+                geojson["features"][0].get("properties", {}).get(code_field, "")
+            )
+            if not sample_code.startswith("GM") and agg["region_code"].str.startswith("GM").all():
+                agg["region_code"] = agg["region_code"].str.replace("GM", "", n=1)
+
+        m = build_choropleth(
+            geojson=geojson,
+            map_data=agg,
+            code_field=code_field,
+            value_col=selected_metric,
+            legend_name=f"{selected_metric_label} - {crime_label} ({selected_year})",
+        )
+
+        status.update(label="Building charts...", state="running")
+        top10 = agg.nlargest(10, selected_metric)
+        fig_bar = px.bar(
+            top10,
+            x="region_name",
+            y=selected_metric,
+            color=selected_metric,
+            color_continuous_scale="OrRd",
+            labels={"region_name": "Municipality", selected_metric: selected_metric_label},
+        )
+        fig_bar.update_layout(showlegend=False, xaxis_tickangle=-45)
+
+        trend_df = df.copy()
+        if selected_crime != "All":
+            trend_df = trend_df[trend_df["crime_name"] == selected_crime]
+        yearly = (
+            trend_df.groupby("year")
+            .agg(total_crimes=("registered_crimes", "sum"))
+            .reset_index()
+        )
+        fig_line = px.line(
+            yearly,
+            x="year",
+            y="total_crimes",
+            markers=True,
+            labels={"year": "Year", "total_crimes": "Total Registered Crimes"},
+        )
+
+        status.update(label="Dashboard ready!", state="complete")
 
     # --- Summary cards ---
     col1, col2, col3, col4 = st.columns(4)
@@ -180,60 +228,14 @@ def main() -> None:
 
     # --- Map ---
     st.subheader(f"Crime Heatmap - {crime_label} ({selected_year})")
-
-    with st.spinner("Building map..."):
-        code_field = get_municipality_code_field(geojson)
-
-        # Match GeoJSON codes to CBS codes
-        if geojson.get("features"):
-            sample_code = str(
-                geojson["features"][0].get("properties", {}).get(code_field, "")
-            )
-            if not sample_code.startswith("GM") and agg["region_code"].str.startswith("GM").all():
-                agg["region_code"] = agg["region_code"].str.replace("GM", "", n=1)
-
-        m = build_choropleth(
-            geojson=geojson,
-            map_data=agg,
-            code_field=code_field,
-            value_col=selected_metric,
-            legend_name=f"{selected_metric_label} - {crime_label} ({selected_year})",
-        )
-
     st_folium(m, width=900, height=600, returned_objects=[])
 
     # --- Top 10 bar chart ---
     st.subheader(f"Top 10 Municipalities by {selected_metric_label} - {crime_label} ({selected_year})")
-    top10 = agg.nlargest(10, selected_metric)
-    fig_bar = px.bar(
-        top10,
-        x="region_name",
-        y=selected_metric,
-        color=selected_metric,
-        color_continuous_scale="OrRd",
-        labels={"region_name": "Municipality", selected_metric: selected_metric_label},
-    )
-    fig_bar.update_layout(showlegend=False, xaxis_tickangle=-45)
     st.plotly_chart(fig_bar, use_container_width=True)
 
     # --- National trend line ---
-    trend_title = f"National Trend - {crime_label}"
-    st.subheader(trend_title)
-    trend_df = df.copy()
-    if selected_crime != "All":
-        trend_df = trend_df[trend_df["crime_name"] == selected_crime]
-    yearly = (
-        trend_df.groupby("year")
-        .agg(total_crimes=("registered_crimes", "sum"))
-        .reset_index()
-    )
-    fig_line = px.line(
-        yearly,
-        x="year",
-        y="total_crimes",
-        markers=True,
-        labels={"year": "Year", "total_crimes": "Total Registered Crimes"},
-    )
+    st.subheader(f"National Trend - {crime_label}")
     st.plotly_chart(fig_line, use_container_width=True)
 
     # --- Data table ---
