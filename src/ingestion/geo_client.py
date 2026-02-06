@@ -46,7 +46,7 @@ def fetch_municipalities_geojson() -> dict:
     return geojson
 
 
-def simplify_geojson(geojson: dict, tolerance: float = 0.001) -> dict:
+def simplify_geojson(geojson: dict, tolerance: float = 0.0001) -> dict:
     """Simplify polygon geometries to reduce file size while preserving shape."""
     simplified_features = []
     for feature in geojson["features"]:
