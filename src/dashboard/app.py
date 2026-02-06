@@ -74,7 +74,7 @@ def build_choropleth(
     legend_name: str,
 ) -> folium.Map:
     """Build a Folium choropleth map of the Netherlands."""
-    m = folium.Map(location=[52.2, 5.3], zoom_start=7, tiles="CartoDB Voyager")
+    m = folium.Map(location=[52.2, 5.3], zoom_start=7, tiles="cartodbpositron")
 
     folium.Choropleth(
         geo_data=geojson,
