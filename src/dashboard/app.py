@@ -1,7 +1,11 @@
 """Streamlit dashboard with interactive crime heatmap for the Netherlands."""
 
 import json
+import sys
 from pathlib import Path
+
+# Ensure project root is on the Python path
+sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 import folium
 import pandas as pd
