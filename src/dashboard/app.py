@@ -7,12 +7,11 @@ from pathlib import Path
 # Ensure project root is on the Python path
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
-import folium
 import pandas as pd
 import plotly.express as px
+import plotly.graph_objects as go
 import streamlit as st
 from sqlalchemy import text
-from streamlit_folium import st_folium
 
 from src.database.connection import engine
 
@@ -49,7 +48,7 @@ def load_crime_data() -> pd.DataFrame:
 
 @st.cache_data(ttl=600)
 def load_geojson() -> dict:
-    """Load municipality GeoJSON boundaries."""
+    """Load simplified municipality GeoJSON boundaries."""
     geo_path = DATA_DIR / "municipalities.geojson"
     with open(geo_path, encoding="utf-8") as f:
         return json.load(f)
@@ -71,26 +70,32 @@ def build_choropleth(
     map_data: pd.DataFrame,
     code_field: str,
     value_col: str,
-    legend_name: str,
-) -> folium.Map:
-    """Build a Folium choropleth map of the Netherlands."""
-    m = folium.Map(location=[52.2, 5.3], zoom_start=7, tiles="cartodbpositron")
-
-    folium.Choropleth(
-        geo_data=geojson,
-        name="choropleth",
-        data=map_data,
-        columns=["region_code", value_col],
-        key_on=f"feature.properties.{code_field}",
-        fill_color="YlOrRd",
-        fill_opacity=0.7,
-        line_opacity=0.3,
-        legend_name=legend_name,
-        nan_fill_color="white",
-    ).add_to(m)
-
-    folium.LayerControl().add_to(m)
-    return m
+    metric_label: str,
+) -> go.Figure:
+    """Build a Plotly choropleth map of the Netherlands."""
+    fig = px.choropleth_mapbox(
+        map_data,
+        geojson=geojson,
+        locations="region_code",
+        featureidkey=f"properties.{code_field}",
+        color=value_col,
+        color_continuous_scale="OrRd",
+        hover_name="region_name",
+        hover_data={
+            "region_code": False,
+            value_col: ":.1f",
+        },
+        labels={value_col: metric_label},
+        mapbox_style="carto-positron",
+        center={"lat": 52.2, "lon": 5.3},
+        zoom=6.3,
+        opacity=0.7,
+    )
+    fig.update_layout(
+        margin={"r": 0, "t": 0, "l": 0, "b": 0},
+        height=600,
+    )
+    return fig
 
 
 def main() -> None:
@@ -163,6 +168,7 @@ def main() -> None:
         status.update(label="Building map...", state="running")
         code_field = get_municipality_code_field(geojson)
 
+        # Match GeoJSON codes to CBS codes
         if geojson.get("features"):
             sample_code = str(
                 geojson["features"][0].get("properties", {}).get(code_field, "")
@@ -170,12 +176,12 @@ def main() -> None:
             if not sample_code.startswith("GM") and agg["region_code"].str.startswith("GM").all():
                 agg["region_code"] = agg["region_code"].str.replace("GM", "", n=1)
 
-        m = build_choropleth(
+        fig_map = build_choropleth(
             geojson=geojson,
             map_data=agg,
             code_field=code_field,
             value_col=selected_metric,
-            legend_name=f"{selected_metric_label} - {crime_label} ({selected_year})",
+            metric_label=selected_metric_label,
         )
 
         status.update(label="Building charts...", state="running")
@@ -228,7 +234,7 @@ def main() -> None:
 
     # --- Map ---
     st.subheader(f"Crime Heatmap - {crime_label} ({selected_year})")
-    st_folium(m, width=900, height=600, returned_objects=[])
+    st.plotly_chart(fig_map, use_container_width=True)
 
     # --- Top 10 bar chart ---
     st.subheader(f"Top 10 Municipalities by {selected_metric_label} - {crime_label} ({selected_year})")

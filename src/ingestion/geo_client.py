@@ -5,6 +5,7 @@ import logging
 from pathlib import Path
 
 import requests
+from shapely.geometry import mapping, shape
 
 logger = logging.getLogger(__name__)
 
@@ -45,6 +46,24 @@ def fetch_municipalities_geojson() -> dict:
     return geojson
 
 
+def simplify_geojson(geojson: dict, tolerance: float = 0.001) -> dict:
+    """Simplify polygon geometries to reduce file size while preserving shape."""
+    simplified_features = []
+    for feature in geojson["features"]:
+        geom = shape(feature["geometry"])
+        simple_geom = geom.simplify(tolerance, preserve_topology=True)
+        feature_copy = {
+            "type": "Feature",
+            "properties": feature["properties"],
+            "geometry": mapping(simple_geom),
+        }
+        simplified_features.append(feature_copy)
+
+    result = {"type": "FeatureCollection", "features": simplified_features}
+    logger.info("Simplified %d features (tolerance=%.4f)", len(simplified_features), tolerance)
+    return result
+
+
 def save_geojson(geojson: dict, filename: str = "municipalities.geojson") -> Path:
     """Save GeoJSON to the raw data landing zone."""
     RAW_DIR.mkdir(parents=True, exist_ok=True)
@@ -56,8 +75,9 @@ def save_geojson(geojson: dict, filename: str = "municipalities.geojson") -> Pat
 
 
 def ingest_geo_data() -> Path:
-    """Full geo ingestion: fetch → save."""
+    """Full geo ingestion: fetch → simplify → save."""
     geojson = fetch_municipalities_geojson()
+    geojson = simplify_geojson(geojson)
     return save_geojson(geojson)
 
 
