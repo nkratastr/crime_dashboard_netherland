@@ -65,6 +65,28 @@ def get_municipality_code_field(geojson: dict) -> str:
     return list(props.keys())[0]
 
 
+def ensure_all_municipalities(
+    geojson: dict, agg: pd.DataFrame, code_field: str, value_col: str,
+) -> pd.DataFrame:
+    """Left join: ensure every GeoJSON municipality appears in the data."""
+    geo_codes = []
+    geo_names = []
+    for feat in geojson.get("features", []):
+        props = feat.get("properties", {})
+        geo_codes.append(props.get(code_field, ""))
+        geo_names.append(props.get("naam", props.get(code_field, "")))
+
+    all_munis = pd.DataFrame({"region_code": geo_codes, "geo_name": geo_names})
+    merged = all_munis.merge(agg, on="region_code", how="left")
+
+    # Fill missing region names from GeoJSON
+    merged["region_name"] = merged["region_name"].fillna(merged["geo_name"])
+    merged["has_data"] = merged[value_col].notna()
+    merged = merged.drop(columns=["geo_name"])
+
+    return merged
+
+
 def build_choropleth(
     geojson: dict,
     map_data: pd.DataFrame,
@@ -73,8 +95,12 @@ def build_choropleth(
     metric_label: str,
 ) -> go.Figure:
     """Build a Plotly choropleth map of the Netherlands."""
+    # Split data into municipalities with and without data
+    has_data = map_data[map_data["has_data"]].copy()
+    no_data = map_data[~map_data["has_data"]].copy()
+
     fig = px.choropleth_mapbox(
-        map_data,
+        has_data,
         geojson=geojson,
         locations="region_code",
         featureidkey=f"properties.{code_field}",
@@ -91,6 +117,28 @@ def build_choropleth(
         zoom=6.3,
         opacity=0.7,
     )
+
+    # Add gray layer for municipalities without data
+    if not no_data.empty:
+        no_data[value_col] = 0
+        fig_gray = px.choropleth_mapbox(
+            no_data,
+            geojson=geojson,
+            locations="region_code",
+            featureidkey=f"properties.{code_field}",
+            color_discrete_sequence=["#d3d3d3"],
+            hover_name="region_name",
+            hover_data={"region_code": False},
+            mapbox_style="carto-positron",
+            center={"lat": 52.2, "lon": 5.3},
+            zoom=6.3,
+            opacity=0.5,
+        )
+        for trace in fig_gray.data:
+            trace.hovertemplate = "<b>%{hovertext}</b><br>No data available<extra></extra>"
+            trace.showlegend = False
+            fig.add_trace(trace)
+
     fig.update_layout(
         margin={"r": 0, "t": 0, "l": 0, "b": 0},
         height=600,
@@ -175,6 +223,9 @@ def main() -> None:
             )
             if not sample_code.startswith("GM") and agg["region_code"].str.startswith("GM").all():
                 agg["region_code"] = agg["region_code"].str.replace("GM", "", n=1)
+
+        # Ensure all GeoJSON municipalities appear (gray for no data)
+        agg = ensure_all_municipalities(geojson, agg, code_field, selected_metric)
 
         fig_map = build_choropleth(
             geojson=geojson,
