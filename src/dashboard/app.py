@@ -95,7 +95,6 @@ def build_choropleth(
     metric_label: str,
 ) -> go.Figure:
     """Build a Plotly choropleth map of the Netherlands."""
-    # Split data into municipalities with and without data
     has_data = map_data[map_data["has_data"]].copy()
     no_data = map_data[~map_data["has_data"]].copy()
 
@@ -118,7 +117,6 @@ def build_choropleth(
         opacity=0.7,
     )
 
-    # Add gray layer for municipalities without data
     if not no_data.empty:
         no_data[value_col] = 0
         fig_gray = px.choropleth_mapbox(
@@ -144,6 +142,26 @@ def build_choropleth(
         height=600,
     )
     return fig
+
+
+@st.cache_data(ttl=600)
+def filter_and_aggregate(
+    _df: pd.DataFrame, selected_year: int, selected_crime: str,
+) -> pd.DataFrame:
+    """Cache filtered + aggregated data per filter combination."""
+    filtered = _df[_df["year"] == selected_year].copy()
+    if selected_crime != "All":
+        filtered = filtered[filtered["crime_name"] == selected_crime]
+
+    agg = (
+        filtered.groupby(["region_code", "region_name"])
+        .agg(
+            total_crimes=("registered_crimes", "sum"),
+            avg_rate_per_1000=("registered_crimes_per_1000", "mean"),
+        )
+        .reset_index()
+    )
+    return agg
 
 
 def main() -> None:
@@ -197,36 +215,45 @@ def main() -> None:
     crime_label = "All Crime Types" if selected_crime == "All" else selected_crime
     st.info(f"Showing: **{crime_label}** in **{selected_year}** | Metric: **{selected_metric_label}**")
 
-    # --- Process everything inside a visible status indicator ---
-    with st.status("Updating dashboard...", expanded=False) as status:
-        status.update(label="Filtering data...", state="running")
-        filtered = df[df["year"] == selected_year].copy()
-        if selected_crime != "All":
-            filtered = filtered[filtered["crime_name"] == selected_crime]
+    # --- Cached aggregation (instant on repeat filter) ---
+    agg = filter_and_aggregate(df, selected_year, selected_crime)
 
-        agg = (
-            filtered.groupby(["region_code", "region_name"])
-            .agg(
-                total_crimes=("registered_crimes", "sum"),
-                avg_rate_per_1000=("registered_crimes_per_1000", "mean"),
-            )
-            .reset_index()
+    code_field = get_municipality_code_field(geojson)
+
+    # Match GeoJSON codes to CBS codes
+    if geojson.get("features"):
+        sample_code = str(
+            geojson["features"][0].get("properties", {}).get(code_field, "")
         )
+        if not sample_code.startswith("GM") and agg["region_code"].str.startswith("GM").all():
+            agg["region_code"] = agg["region_code"].str.replace("GM", "", n=1)
 
-        status.update(label="Building map...", state="running")
-        code_field = get_municipality_code_field(geojson)
+    agg = ensure_all_municipalities(geojson, agg, code_field, selected_metric)
 
-        # Match GeoJSON codes to CBS codes
-        if geojson.get("features"):
-            sample_code = str(
-                geojson["features"][0].get("properties", {}).get(code_field, "")
-            )
-            if not sample_code.startswith("GM") and agg["region_code"].str.startswith("GM").all():
-                agg["region_code"] = agg["region_code"].str.replace("GM", "", n=1)
+    # --- Summary cards ---
+    agg_with_data = agg[agg["has_data"]]
+    col1, col2, col3, col4 = st.columns(4)
+    with col1:
+        st.metric("Total Registered Crimes", f"{agg_with_data['total_crimes'].sum():,.0f}")
+    with col2:
+        if not agg_with_data.empty:
+            st.metric("Avg Rate per 1,000", f"{agg_with_data['avg_rate_per_1000'].mean():,.1f}")
+        else:
+            st.metric("Avg Rate per 1,000", "N/A")
+    with col3:
+        if not agg_with_data.empty:
+            top = agg_with_data.loc[agg_with_data[selected_metric].idxmax()]
+            st.metric("Highest Municipality", top["region_name"])
+        else:
+            st.metric("Highest Municipality", "N/A")
+    with col4:
+        has_count = agg["has_data"].sum()
+        st.metric("Municipalities", f"{has_count} / {len(agg)}")
 
-        # Ensure all GeoJSON municipalities appear (gray for no data)
-        agg = ensure_all_municipalities(geojson, agg, code_field, selected_metric)
-
+    # --- Map and charts in a fragment (only this section re-renders) ---
+    @st.fragment
+    def render_visualizations():
+        st.subheader(f"Crime Heatmap - {crime_label} ({selected_year})")
         fig_map = build_choropleth(
             geojson=geojson,
             map_data=agg,
@@ -234,9 +261,10 @@ def main() -> None:
             value_col=selected_metric,
             metric_label=selected_metric_label,
         )
+        st.plotly_chart(fig_map, use_container_width=True)
 
-        status.update(label="Building charts...", state="running")
-        top10 = agg.nlargest(10, selected_metric)
+        st.subheader(f"Top 10 Municipalities by {selected_metric_label} - {crime_label} ({selected_year})")
+        top10 = agg_with_data.nlargest(10, selected_metric)
         fig_bar = px.bar(
             top10,
             x="region_name",
@@ -246,7 +274,9 @@ def main() -> None:
             labels={"region_name": "Municipality", selected_metric: selected_metric_label},
         )
         fig_bar.update_layout(showlegend=False, xaxis_tickangle=-45)
+        st.plotly_chart(fig_bar, use_container_width=True)
 
+        st.subheader(f"National Trend - {crime_label}")
         trend_df = df.copy()
         if selected_crime != "All":
             trend_df = trend_df[trend_df["crime_name"] == selected_crime]
@@ -262,42 +292,15 @@ def main() -> None:
             markers=True,
             labels={"year": "Year", "total_crimes": "Total Registered Crimes"},
         )
+        st.plotly_chart(fig_line, use_container_width=True)
 
-        status.update(label="Dashboard ready!", state="complete")
+        with st.expander(f"View Raw Data - {crime_label} ({selected_year})"):
+            st.dataframe(
+                agg_with_data.sort_values("total_crimes", ascending=False),
+                use_container_width=True,
+            )
 
-    # --- Summary cards ---
-    col1, col2, col3, col4 = st.columns(4)
-    with col1:
-        st.metric("Total Registered Crimes", f"{agg['total_crimes'].sum():,.0f}")
-    with col2:
-        if not agg.empty:
-            st.metric("Avg Rate per 1,000", f"{agg['avg_rate_per_1000'].mean():,.1f}")
-        else:
-            st.metric("Avg Rate per 1,000", "N/A")
-    with col3:
-        if not agg.empty:
-            top = agg.loc[agg[selected_metric].idxmax()]
-            st.metric("Highest Municipality", top["region_name"])
-        else:
-            st.metric("Highest Municipality", "N/A")
-    with col4:
-        st.metric("Municipalities", f"{len(agg)}")
-
-    # --- Map ---
-    st.subheader(f"Crime Heatmap - {crime_label} ({selected_year})")
-    st.plotly_chart(fig_map, use_container_width=True)
-
-    # --- Top 10 bar chart ---
-    st.subheader(f"Top 10 Municipalities by {selected_metric_label} - {crime_label} ({selected_year})")
-    st.plotly_chart(fig_bar, use_container_width=True)
-
-    # --- National trend line ---
-    st.subheader(f"National Trend - {crime_label}")
-    st.plotly_chart(fig_line, use_container_width=True)
-
-    # --- Data table ---
-    with st.expander(f"View Raw Data - {crime_label} ({selected_year})"):
-        st.dataframe(agg.sort_values("total_crimes", ascending=False), use_container_width=True)
+    render_visualizations()
 
 
 if __name__ == "__main__":
